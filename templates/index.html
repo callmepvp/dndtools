@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>DnD Tools</title>
+  <link rel="stylesheet" href="static/css/styles.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+  <style>
+    /* Add these new styles */
+    #initiative_modal {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0,0,0,0.5);
+      z-index: 2000;
+      justify-content: center;
+      align-items: center;
+    }
+    #initiative_modal > div {
+      background: white;
+      padding: 20px;
+      border-radius: 5px;
+      width: 300px;
+      max-height: 80vh;
+      overflow-y: auto;
+    }
+    .encounter-tools {
+      margin-top: 30px;
+      border-top: 1px solid #ddd;
+      padding-top: 15px;
+    }
+    #encounter_files {
+      display: none;
+      margin-top: 10px;
+    }
+    #encounter_select {
+      width: 100%;
+      padding: 5px;
+      margin-bottom: 5px;
+    }
+  </style>
+</head>
+<body>
+    <audio id="turnSound" preload="auto">
+        <source src="/static/sounds/ding.wav" type="audio/mpeg">
+        Your browser does not support the audio element.
+    </audio>
+    <div class="your-turn" id="your_turn">YOUR TURN!</div>
+  
+  <div class="wrapper">
+    <!-- Control Panel -->
+    <div class="control-container">
+      <h2>Assume Control</h2>
+      <p>Select your character:</p>
+      <ul id="character_list"></ul>
+      <div id="controlled_character" style="margin-top: 20px; display: none;">
+        <h3>You control:</h3>
+        <p id="controlled_char_name" style="font-weight: bold;"></p>
+      </div>
+    </div>
+    
+    <!-- Combat Tracker Container -->
+    <div class="combat-container">
+        <h1>Combat Tracker</h1>
+        <div class="current-turn-display">
+          <p>Combat Turn: <span id="combat_turn">1</span></p>
+          <p>Current Turn: <span id="current_player">Loading...</span></p>
+          <div class="character-image-container">
+            <img id="current_player_img" src="" alt="">
+          </div>
+        </div>
+        <button onclick="nextTurn()">Next Turn</button>
+        <h3>Initiative Order</h3>
+        <ul id="initiative_order"></ul>
+        <button class="dm-toggle" onclick="toggleDM()">I'm the DM</button>
+    </div>
+    
+    <!-- DM Panel (initially hidden) -->
+    <div class="dm-container" id="dm_panel">
+        <h3>Add Character</h3>
+        <input type="text" id="char_name" placeholder="Name">
+        <input type="number" id="char_init" placeholder="Initiative">
+        <input type="text" id="char_img" placeholder="Image filename (optional)">
+        
+        <!-- Updated Checkbox Section -->
+        <div style="align-items: center; margin: 10px 0;">
+        <input type="checkbox" id="is_player" style="margin: 0 5px 0 0;">
+        <label for="is_player" style="cursor: pointer;">Player?</label>
+        </div>
+        
+        <button onclick="addCharacter()">Add Character</button>
+        
+        <!-- Rest of your DM panel content remains the same -->
+        <h3 style="margin-top: 20px;">Add SRD Monster</h3>
+        <input type="text" id="monster_search" placeholder="Search official monsters...">
+        <div id="monster_loading" style="display: none;">
+        <span class="loading-spinner"></span> Searching...
+        </div>
+        <ul id="monster_results"></ul>
+        <div id="selected_monster" style="display: none; margin-top: 10px;">
+        <input type="number" id="monster_init" placeholder="Initiative">
+        <input type="text" id="monster_img" placeholder="Image filename (optional)">
+        <button onclick="addSRDMonster()">Add Monster</button>
+        </div>
+        
+        <!-- Encounter Management Tools -->
+        <div class="encounter-tools">
+        <h3>Encounter Management</h3>
+        <button onclick="saveEncounter()">Save Current Encounter</button>
+        <button onclick="loadEncounterList()">Load Encounter</button>
+        <div id="encounter_files" style="display: none; margin-top: 10px;">
+            <select id="encounter_select" style="width: 100%; padding: 5px;"></select>
+            <button onclick="loadSelectedEncounter()" style="margin-top: 5px;">Confirm Load</button>
+        </div>
+        </div>
+    </div>
+  </div>
+
+  <!-- Initiative Input Modal -->
+  <div id="initiative_modal">
+    <div>
+      <h3>Enter Initiative Values</h3>
+      <div id="monster_init_inputs"></div>
+      <button onclick="finalizeLoadedEncounter()" style="margin-top: 10px;">Add to Combat</button>
+    </div>
+  </div>
+
+  <script>
+    var socket = io();
+    var isDM = false;
+    var controlledCharacter = null;
+    var currentTurnCharacter = null;
+    var selectedMonsterData = null;
+    var monstersToLoad = [];
+    var currentEncounterData = null;
+
+    socket.on('update_turn', function(data) {
+      currentTurnCharacter = data.current_player;
+      currentEncounterData = data.initiative_order; // Store current encounter data
+      document.getElementById("combat_turn").innerText = data.combat_turn;
+      document.getElementById("current_player").innerText = data.current_player;
+
+      // Update initiative order list with initiative number
+      var list = document.getElementById("initiative_order");
+      list.innerHTML = '';
+      data.initiative_order.forEach(function(player) {
+        var li = document.createElement("li");
+        li.innerText = "(" + player.initiative + ") " + player.name;
+        list.appendChild(li);
+      });
+
+      // Update character list for control panel
+      var charList = document.getElementById("character_list");
+      charList.innerHTML = '';
+      data.initiative_order.forEach(function(player) {
+        var li = document.createElement("li");
+        li.innerText = player.name;
+        li.onclick = function() { assumeControl(player.name); };
+        if (controlledCharacter === player.name) {
+          li.classList.add("selected");
+        }
+        charList.appendChild(li);
+      });
+
+    // Update current player's image if provided
+    var imgElement = document.getElementById("current_player_img");
+    if (data.current_player_image) {
+    imgElement.src = data.current_player_image;
+    imgElement.style.display = "block";
+    document.querySelector(".character-image-container").style.display = "flex";
+    } else {
+    imgElement.style.display = "none";
+    document.querySelector(".character-image-container").style.display = "none";
+    }
+
+      // Show "Your Turn" notification if it's the controlled character's turn
+      updateYourTurnNotification();
+    });
+
+    function assumeControl(characterName) {
+      controlledCharacter = characterName;
+      document.getElementById("controlled_character").style.display = "block";
+      document.getElementById("controlled_char_name").innerText = characterName;
+      
+      // Update the display to show which character is selected
+      var items = document.getElementById("character_list").getElementsByTagName("li");
+      for (var i = 0; i < items.length; i++) {
+        if (items[i].innerText === characterName) {
+          items[i].classList.add("selected");
+        } else {
+          items[i].classList.remove("selected");
+        }
+      }
+      
+      // Update the "Your Turn" notification immediately
+      updateYourTurnNotification();
+    }
+
+    function updateYourTurnNotification() {
+        var yourTurnElement = document.getElementById("your_turn");
+        var turnSound = document.getElementById("turnSound");
+        
+        if (controlledCharacter && controlledCharacter === currentTurnCharacter) {
+            yourTurnElement.style.display = "block";
+            // Play the sound (reset it first in case it's still playing from previous turn)
+            turnSound.currentTime = 0;
+            turnSound.play().catch(e => console.log("Audio play failed:", e));
+        } else {
+            yourTurnElement.style.display = "none";
+        }
+    }
+
+    function nextTurn() { socket.emit('next_turn'); }
+
+    function addCharacter() {
+      var name = document.getElementById("char_name").value;
+      var initiative = document.getElementById("char_init").value;
+      var image = document.getElementById("char_img").value;
+      var isPlayer = document.getElementById("is_player").checked;
+
+      if (name && initiative) {
+        socket.emit('add_character', { 
+          name: name, 
+          initiative: initiative, 
+          image: image,
+          is_player: isPlayer
+        });
+        // Clear inputs after submission
+        document.getElementById("char_name").value = "";
+        document.getElementById("char_init").value = "";
+        document.getElementById("char_img").value = "";
+        document.getElementById("is_player").checked = false;
+      }
+    }
+
+    // Monster search functions
+    function getSearchRelevance(monster, query) {
+        const name = monster.name.toLowerCase();
+        const q = query.toLowerCase();
+        
+        if (name === q) return 100;
+        if (name.startsWith(q)) return 90;
+        if (name.includes(q)) return 80;
+        if (q.split('').every(c => name.includes(c))) return 70;
+        return 0;
+    }
+
+    function sortByRelevance(results, query) {
+        return results
+            .map(monster => ({
+                monster,
+                score: getSearchRelevance(monster, query)
+            }))
+            .filter(item => item.score > 0)
+            .sort((a, b) => b.score - a.score)
+            .map(item => item.monster)
+            .slice(0, 5);
+    }
+
+    async function searchMonsters() {
+        const query = document.getElementById("monster_search").value.trim();
+        if (query.length < 2) {
+            document.getElementById("monster_results").innerHTML = "";
+            document.getElementById("monster_results").style.display = "none";
+            return;
+        }
+        
+        const resultsEl = document.getElementById("monster_results");
+        const loadingEl = document.getElementById("monster_loading");
+        
+        resultsEl.style.display = "none";
+        loadingEl.style.display = "block";
+        resultsEl.innerHTML = "";
+        
+        try {
+            const response = await fetch(`https://api.open5e.com/monsters/?search=${encodeURIComponent(query)}&ordering=name`);
+            const data = await response.json();
+            
+            if (data.results && data.results.length > 0) {
+                const relevantResults = sortByRelevance(data.results, query);
+                
+                if (relevantResults.length > 0) {
+                    relevantResults.forEach(monster => {
+                        const li = document.createElement("li");
+                        li.textContent = `${monster.name} (HP: ${monster.hit_points}, AC: ${monster.armor_class})`;
+                        li.onclick = () => selectMonster(monster);
+                        resultsEl.appendChild(li);
+                    });
+                } else {
+                    resultsEl.innerHTML = "<li>No matching monsters found</li>";
+                }
+            } else {
+                resultsEl.innerHTML = "<li>No monsters found</li>";
+            }
+        } catch (error) {
+            console.error("Monster search failed:", error);
+            resultsEl.innerHTML = "<li>Error loading monsters</li>";
+        } finally {
+            loadingEl.style.display = "none";
+            resultsEl.style.display = "block";
+        }
+    }
+
+    function selectMonster(monsterData) {
+      selectedMonsterData = monsterData;
+      document.getElementById("selected_monster").style.display = "block";
+      document.getElementById("monster_search").value = monsterData.name;
+      document.getElementById("monster_results").innerHTML = "";
+      document.getElementById("monster_results").style.display = "none";
+      
+      const dexMod = Math.floor((monsterData.dexterity - 10) / 2);
+      const initiative = dexMod + Math.floor(Math.random() * 20) + 1;
+      document.getElementById("monster_init").value = initiative;
+    }
+
+    function addSRDMonster() {
+      const initiative = parseInt(document.getElementById("monster_init").value);
+      const image = document.getElementById("monster_img").value;
+      
+      if (selectedMonsterData && !isNaN(initiative)) {
+        socket.emit('add_character', {
+          name: selectedMonsterData.name,
+          initiative: initiative,
+          image: image,
+          srd_data: selectedMonsterData,
+          is_player: false
+        });
+        
+        document.getElementById("selected_monster").style.display = "none";
+        document.getElementById("monster_init").value = "";
+        document.getElementById("monster_img").value = "";
+        document.getElementById("monster_search").value = "";
+        selectedMonsterData = null;
+      }
+    }
+
+    // Encounter save/load functions
+    async function saveEncounter() {
+      try {
+        const response = await fetch('/save_encounter', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ characters: currentEncounterData })
+        });
+        const result = await response.json();
+        if (result.status === 'success') {
+          alert(`Encounter saved as ${result.filename}`);
+        } else {
+          alert('Failed to save encounter');
+        }
+      } catch (error) {
+        console.error('Save error:', error);
+        alert('Error saving encounter');
+      }
+    }
+
+    async function loadEncounterList() {
+      try {
+        const response = await fetch('/list_encounters');
+        const result = await response.json();
+        if (result.status === 'success' && result.files.length > 0) {
+          const select = document.getElementById('encounter_select');
+          select.innerHTML = '';
+          result.files.forEach(file => {
+            const option = document.createElement('option');
+            option.value = file;
+            option.textContent = file;
+            select.appendChild(option);
+          });
+          document.getElementById('encounter_files').style.display = 'block';
+        } else {
+          alert('No saved encounters found');
+        }
+      } catch (error) {
+        console.error('Load list error:', error);
+        alert('Error loading encounter list');
+      }
+    }
+
+    async function loadSelectedEncounter() {
+      const filename = document.getElementById('encounter_select').value;
+      try {
+        const response = await fetch('/load_encounter', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ filename })
+        });
+        const result = await response.json();
+        if (result.status === 'success') {
+          monstersToLoad = result.monsters;
+          showInitiativeInputModal();
+        } else {
+          alert('Failed to load encounter');
+        }
+      } catch (error) {
+        console.error('Load error:', error);
+        alert('Error loading encounter');
+      }
+    }
+
+    function showInitiativeInputModal() {
+      const container = document.getElementById('monster_init_inputs');
+      container.innerHTML = '';
+      
+      monstersToLoad.forEach((monster, index) => {
+        const div = document.createElement('div');
+        div.style.marginBottom = '10px';
+        div.innerHTML = `
+          <label>${monster.name}:</label>
+          <input type="number" id="init_${index}" placeholder="Initiative" style="width: 60px;">
+        `;
+        container.appendChild(div);
+      });
+      
+      document.getElementById('initiative_modal').style.display = 'flex';
+    }
+
+    function finalizeLoadedEncounter() {
+      monstersToLoad.forEach((monster, index) => {
+        const initiative = parseInt(document.getElementById(`init_${index}`).value);
+        if (!isNaN(initiative)) {
+          socket.emit('add_character', {
+            name: monster.name,
+            initiative: initiative,
+            image: monster.image,
+            srd_data: monster.srd_data,
+            is_player: false
+          });
+        }
+      });
+      
+      document.getElementById('initiative_modal').style.display = 'none';
+      document.getElementById('encounter_files').style.display = 'none';
+    }
+
+    function toggleDM() {
+      isDM = !isDM;
+      var dmPanel = document.getElementById("dm_panel");
+      dmPanel.style.display = isDM ? "block" : "none";
+    }
+
+    // Event listeners
+    document.getElementById("monster_search").addEventListener("input", searchMonsters);
+  </script>
+</body>
+</html>
